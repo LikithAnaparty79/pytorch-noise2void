@@ -5,6 +5,9 @@ from skimage import transform
 import matplotlib.pyplot as plt
 import os
 import copy
+from skimage import exposure
+from scipy import io 
+import json
 
 
 class Dataset(torch.utils.data.Dataset):
@@ -14,7 +17,7 @@ class Dataset(torch.utils.data.Dataset):
        stuff<number>_density.pt
     """
 
-    def __init__(self, data_dir, data_type='float32', transform=None, sgm=25, ratio=0.9, size_data=(256, 256, 3), size_window=(5, 5)):
+    def __init__(self, data_dir, data_type='float32', transform=None, sgm=25, ratio=0.9, size_data=(128, 128, 3), size_window=(5, 5), norm_method='minmax'):
         self.data_dir = data_dir
         self.transform = transform
         self.data_type = data_type
@@ -23,6 +26,13 @@ class Dataset(torch.utils.data.Dataset):
         self.ratio = ratio
         self.size_data = size_data
         self.size_window = size_window
+        self.norm_method = norm_method
+
+        # Initialize global stats
+        self.global_mean = None
+        self.global_std = None
+        self.global_min = None
+        self.global_max = None
 
         lst_data = os.listdir(data_dir)
 
@@ -39,41 +49,88 @@ class Dataset(torch.utils.data.Dataset):
         # lst_data.sort(key=lambda f: int(''.join(filter(str.isdigit, f))))
 
         self.lst_data = lst_data
-        self.noise = self.sgm / 255.0 * np.random.randn(len(self.lst_data), self.size_data[0], self.size_data[1], self.size_data[2])
+        
+        # Calculate global stats if needed
+        if norm_method in ['global-minmax', 'z-score', 'adaptive']:
+            self._calculate_global_stats()
+
+    
+
+    def normalize_image(self, img):
+        """Apply various normalization methods to the image"""
+        if self.norm_method == 'minmax':
+            # Simple min-max normalization
+            min_val, max_val = img.min(), img.max()
+            if max_val > min_val:
+                return (img - min_val) / (max_val - min_val)
+            return np.zeros_like(img)
+            
+        elif self.norm_method == 'global-minmax' and self.global_min is not None:
+            # Global min-max normalization using dataset stats
+            return np.clip((img - self.global_min) / (self.global_max - self.global_min), 0, 1)
+            
+        elif self.norm_method == 'z-score' and self.global_mean is not None:
+            # Z-score normalization using dataset stats
+            z = (img - self.global_mean) / (self.global_std + 1e-6)
+            return np.clip((z + 3) / 6, 0, 1)  # Rescale to [0,1] range
+            
+        elif self.norm_method == 'adaptive':
+            # First normalize to [0,1]
+            if self.global_min is not None:
+                norm = np.clip((img - self.global_min) / (self.global_max - self.global_min), 0, 1)
+            else:
+                min_val, max_val = img.min(), img.max()
+                if max_val > min_val:
+                    norm = (img - min_val) / (max_val - min_val)
+                else:
+                    norm = np.zeros_like(img)
+            return norm
+            
+            # # Apply CLAHE (Contrast Limited Adaptive Histogram Equalization)
+            # try:
+            #     return exposure.equalize_adapthist(norm, clip_limit=0.03)
+            # except:
+            #     return norm
+                
+        # Default: return image as is
+        # return img
 
     def __getitem__(self, index):
-        # label = np.load(os.path.join(self.data_dir, self.lst_label[index]))
-        # input = np.load(os.path.join(self.data_dir, self.lst_input[index]))
-        #
-        # if label.dtype == np.uint8:
-        #     label = label / 255.0
-        # if input.dtype == np.uint8:
-        #     input = input / 255.0
-        #
-        # if label.ndim == 2:
-        #     label = np.expand_dims(label, axis=2)
-        # if input.ndim == 2:
-        #     input = np.expand_dims(input, axis=2)
-        #
-        # if self.ny != label.shape[0]:
-        #     label = label.transpose((1, 0, 2))
-        # if self.ny != input.shape[0]:
-        #     input = input.transpose((1, 0, 2))
-        #
-        # data = {'input': input, 'label': label}
-
-        data = plt.imread(os.path.join(self.data_dir, self.lst_data[index]))
-
-        if data.dtype == np.uint8:
-            data = data / 255.0
-
+        file_path = os.path.join(self.data_dir, self.lst_data[index])
+        
+        # Check file type and load accordingly
+        if file_path.endswith('.npy'):
+            data = np.load(file_path)
+        elif file_path.endswith('.mat'):
+            try:
+                mat_contents = io.loadmat(file_path)
+                if 'noisy_image' in mat_contents:
+                    data = mat_contents['noisy_image']
+                elif 'clean_image' in mat_contents:
+                    data = mat_contents['clean_image']
+                data = data.astype(np.float32)
+            except Exception as e:
+                print(f"Error loading .mat file {file_path}: {e}")
+                # Return zeros as fallback
+                data = np.zeros(self.size_data, dtype=np.float32)
+        else:
+            data = plt.imread(file_path)
+            if data.dtype == np.uint8:
+                data = data / 255.0
+      
+        # Ensure data has correct shape
         if data.ndim == 2:
             data = np.expand_dims(data, axis=2)
 
         if data.shape[0] > data.shape[1]:
             data = data.transpose((1, 0, 2))
 
-        label = data + self.noise[index]
+        # Apply normalization
+        data = self.normalize_image(data)
+
+        # For Noise2Void with CT data, we use the noisy data as is
+        # No additional noise is added since our data is already noisy
+        label = data  # Original noisy data
         input, mask = self.generate_mask(copy.deepcopy(label))
 
         data = {'label': label, 'input': input, 'mask': mask}
@@ -87,7 +144,6 @@ class Dataset(torch.utils.data.Dataset):
         return len(self.lst_data)
 
     def generate_mask(self, input):
-
         ratio = self.ratio
         size_window = self.size_window
         size_data = self.size_data
@@ -116,6 +172,72 @@ class Dataset(torch.utils.data.Dataset):
             mask[id_msk] = 0.0
 
         return output, mask
+
+    def _calculate_global_stats(self):
+        """Calculate global dataset statistics for better normalization using the entire dataset"""
+        print("Calculating global dataset statistics on ENTIRE dataset...")
+        
+        # Process ALL images, not just a sample
+        all_values = []
+        min_vals = []
+        max_vals = []
+        
+        total_files = len(self.lst_data)
+        for idx, file_name in enumerate(self.lst_data):
+            try:
+                file_path = os.path.join(self.data_dir, file_name)
+                
+                if file_path.endswith('.npy'):
+                    img = np.load(file_path)
+                elif file_path.endswith('.mat'):
+                    # Handle .mat files
+                    mat_contents = io.loadmat(file_path)
+                    if 'noisy_image' in mat_contents:
+                        img = mat_contents['noisy_image']
+                    elif 'clean_image' in mat_contents:
+                        img = mat_contents['clean_image']
+                else:
+                    img = plt.imread(file_path)
+                    if img.dtype == np.uint8:
+                        img = img / 255.0
+                
+                all_values.append(img.ravel())
+                min_vals.append(img.min())
+                max_vals.append(img.max())
+                
+                # Print progress
+                if (idx + 1) % 10 == 0 or idx == total_files - 1:
+                    print(f"Processed {idx + 1}/{total_files} files ({(idx + 1) / total_files * 100:.1f}%)")
+                    
+            except Exception as e:
+                print(f"Error processing {file_path}: {e}")
+        
+        if all_values:
+            # Concatenate all values
+            all_values = np.concatenate(all_values)
+            
+            # Calculate global statistics
+            self.global_mean = float(np.mean(all_values))
+            self.global_std = float(np.std(all_values))
+            self.global_min = float(min(min_vals))
+            self.global_max = float(max(max_vals))
+            
+            print(f"Global stats (full dataset): mean={self.global_mean:.4f}, std={self.global_std:.4f}, "
+                  f"min={self.global_min:.4f}, max={self.global_max:.4f}")
+            
+            # Save stats 
+            try:
+                stats = {
+                    'mean': self.global_mean,
+                    'std': self.global_std,
+                    'min': self.global_min,
+                    'max': self.global_max
+                }
+                with open(stats_file, 'w') as f:
+                    json.dump(stats, f)
+                print(f"Saved global stats to {stats_file}")
+            except Exception as e:
+                print(f"Error saving stats to file: {e}")
 
 class ToTensor(object):
     """Convert ndarrays in sample to Tensors."""

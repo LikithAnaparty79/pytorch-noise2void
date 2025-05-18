@@ -5,6 +5,18 @@ import torch.nn as nn
 from torch.nn import init
 from torch.optim import lr_scheduler
 
+# Charbonnier Loss (robust L1)
+class CharbonnierLoss(nn.Module):
+    """Charbonnier Loss (robust L1)."""
+    def __init__(self, eps=1e-3):
+        super().__init__()
+        self.eps = eps
+    
+    def forward(self, x, y):
+        d = x - y
+        return torch.mean(torch.sqrt(d*d + self.eps*self.eps))
+
+
 # U-Net: Convolutional Networks for Biomedical Image Segmentation
 # https://arxiv.org/abs/1505.04597
 class UNet(nn.Module):

@@ -1,8 +1,10 @@
 from model import *
 from dataset import *
+from utils import calculate_psnr
 
 import torch
 import torch.nn as nn
+from torch.optim.lr_scheduler import StepLR
 
 from torchvision import transforms
 from torch.utils.tensorboard import SummaryWriter
@@ -16,6 +18,7 @@ class Train:
 
         self.scope = args.scope
         self.norm = args.norm
+        self.norm_method = args.norm_method if hasattr(args, 'norm_method') else 'minmax'
 
         self.dir_checkpoint = args.dir_checkpoint
         self.dir_log = args.dir_log
@@ -117,6 +120,7 @@ class Train:
         size_window = (5, 5)
 
         norm = self.norm
+        norm_method = self.norm_method
         name_data = self.name_data
 
         num_freq_disp = self.num_freq_disp
@@ -138,13 +142,13 @@ class Train:
         if not os.path.exists(os.path.join(dir_result_val, 'images')):
             os.makedirs(os.path.join(dir_result_val, 'images'))
 
-        transform_train = transforms.Compose([Normalize(mean=0.5, std=0.5), RandomFlip(), RandomCrop((self.ny_load, self.nx_load)), ToTensor()])
-        transform_val = transforms.Compose([Normalize(mean=0.5, std=0.5), RandomFlip(), RandomCrop((self.ny_load, self.nx_load)), ToTensor()])
+        transform_train = transforms.Compose([RandomFlip(), RandomCrop((self.ny_load, self.nx_load)), ToTensor()])
+        transform_val = transforms.Compose([RandomFlip(), RandomCrop((self.ny_load, self.nx_load)), ToTensor()])
 
-        transform_inv = transforms.Compose([ToNumpy(), Denormalize(mean=0.5, std=0.5)])
+        transform_inv = transforms.Compose([ToNumpy()])
 
-        dataset_train = Dataset(dir_data_train, data_type=self.data_type, transform=transform_train, sgm=25, ratio=0.9, size_data=size_data, size_window=size_window)
-        dataset_val = Dataset(dir_data_val, data_type=self.data_type, transform=transform_val, sgm=25, ratio=0.9, size_data=size_data, size_window=size_window)
+        dataset_train = Dataset(dir_data_train, data_type=self.data_type, transform=transform_train, sgm=25, ratio=0.8, size_data=size_data, size_window=size_window, norm_method=norm_method)
+        dataset_val = Dataset(dir_data_val, data_type=self.data_type, transform=transform_val, sgm=25, ratio=0.8, size_data=size_data, size_window=size_window, norm_method=norm_method)
 
         loader_train = torch.utils.data.DataLoader(dataset_train, batch_size=batch_size, shuffle=True, num_workers=8)
         loader_val = torch.utils.data.DataLoader(dataset_val, batch_size=batch_size, shuffle=True, num_workers=8)
@@ -167,12 +171,17 @@ class Train:
         init_net(netG, init_type='normal', init_gain=0.02, gpu_ids=gpu_ids)
 
         ## setup loss & optimization
-        fn_REG = nn.L1Loss().to(device)  # Regression loss: L1
-        # fn_REG = nn.MSELoss().to(device)     # Regression loss: L2
+        # Use CharbonnierLoss instead of L1Loss for better denoising performance
+        fn_REG = CharbonnierLoss().to(device)  # Charbonnier loss (robust L1)
+        # fn_REG = nn.L1Loss().to(device)  # Original L1 loss
+        # fn_REG = nn.MSELoss().to(device)  # L2 loss
 
         paramsG = netG.parameters()
 
         optimG = torch.optim.Adam(paramsG, lr=lr_G, betas=(self.beta1, 0.999))
+        
+        # learning rate scheduler (StepLR)
+        scheduler = StepLR(optimG, step_size=50, gamma=0.5)
 
         ## load from checkpoints
         st_epoch = 0
@@ -189,6 +198,7 @@ class Train:
             netG.train()
 
             loss_G_train = []
+            psnr_train = []
 
             for batch, data in enumerate(loader_train, 1):
                 def should(freq):
@@ -211,9 +221,18 @@ class Train:
 
                 # get losses
                 loss_G_train += [loss_G.item()]
+                
+                # Calculate PSNR for monitoring
+                with torch.no_grad():
+                    # Use the unmasked part for PSNR calculation
+                    output_np = output.detach().cpu().numpy()
+                    label_np = label.detach().cpu().numpy()
+                    psnr = calculate_psnr(output_np, label_np)
+                    psnr_train.append(psnr)
 
-                print('TRAIN: EPOCH %d: BATCH %04d/%04d: LOSS: %.4f'
-                      % (epoch, batch, num_batch_train, np.mean(loss_G_train)))
+                if batch % 100 == 0:  # Only print every 100 batches
+                    print('TRAIN: EPOCH %d: BATCH %04d/%04d: LOSS: %.4f, PSNR: %.2f dB' % 
+                          (epoch, batch, num_batch_train, np.mean(loss_G_train), np.mean(psnr_train)))
 
                 if should(num_freq_disp):
                     ## show output
@@ -221,6 +240,7 @@ class Train:
                     label = transform_inv(label)
                     output = transform_inv(output)
 
+                    # Clip values to [0,1] range for proper visualization
                     input = np.clip(input, 0, 1)
                     label = np.clip(label, 0, 1)
                     output = np.clip(output, 0, 1)
@@ -247,12 +267,14 @@ class Train:
                         append_index(dir_result_train, fileset)
 
             writer_train.add_scalar('loss_G', np.mean(loss_G_train), epoch)
+            writer_train.add_scalar('psnr', np.mean(psnr_train), epoch)
 
             ## validation phase
             with torch.no_grad():
                 netG.eval()
 
                 loss_G_val = []
+                psnr_val = []
 
                 for batch, data in enumerate(loader_val, 1):
                     def should(freq):
@@ -269,9 +291,16 @@ class Train:
                     loss_G = fn_REG(output * (1 - mask), label * (1 - mask))
 
                     loss_G_val += [loss_G.item()]
+                    
+                    # Calculate PSNR
+                    output_np = output.detach().cpu().numpy()
+                    label_np = label.detach().cpu().numpy()
+                    psnr = calculate_psnr(output_np, label_np)
+                    psnr_val.append(psnr)
 
-                    print('VALID: EPOCH %d: BATCH %04d/%04d: LOSS: %.4f'
-                          % (epoch, batch, num_batch_val, np.mean(loss_G_val)))
+                    if batch % 100 == 0:  # Only print every 100 batches
+                        print('VALID: EPOCH %d: BATCH %04d/%04d: LOSS: %.4f, PSNR: %.2f dB'
+                              % (epoch, batch, num_batch_val, np.mean(loss_G_val), np.mean(psnr_val)))
 
                     if should(num_freq_disp):
                         ## show output
@@ -279,6 +308,7 @@ class Train:
                         label = transform_inv(label)
                         output = transform_inv(output)
 
+                        # Clip values to [0,1] range for proper visualization
                         input = np.clip(input, 0, 1)
                         label = np.clip(label, 0, 1)
                         output = np.clip(output, 0, 1)
@@ -305,10 +335,14 @@ class Train:
                             append_index(dir_result_val, fileset)
 
                 writer_val.add_scalar('loss_G', np.mean(loss_G_val), epoch)
+                writer_val.add_scalar('psnr', np.mean(psnr_val), epoch)
 
-            # update schduler
-            # schedG.step()
-            # schedD.step()
+            scheduler.step()
+            
+            # Log current learning rate
+            current_lr = optimG.param_groups[0]['lr']
+            writer_train.add_scalar('learning_rate', current_lr, epoch)
+            print(f"Epoch {epoch} completed. Learning rate: {current_lr:.6f}")
 
             ## save
             if (epoch % num_freq_save) == 0:
@@ -331,8 +365,8 @@ class Train:
         size_data = (self.ny_in, self.nx_in, self.nch_in)
         size_window = (5, 5)
 
-
         norm = self.norm
+        norm_method = self.norm_method
 
         name_data = self.name_data
 
@@ -350,12 +384,12 @@ class Train:
 
         dir_data_test = os.path.join(self.dir_data, name_data, 'test')
 
-        transform_test = transforms.Compose([Normalize(mean=0.5, std=0.5), ToTensor()])
-        transform_inv = transforms.Compose([ToNumpy(), Denormalize(mean=0.5, std=0.5)])
+        transform_test = transforms.Compose([ToTensor()])
+        transform_inv = transforms.Compose([ToNumpy()])
         transform_ts2np = ToNumpy()
 
         # dataset_test = Dataset(dir_data_test, data_type=self.data_type, transform=transform_test, sgm=(0, 25))
-        dataset_test = Dataset(dir_data_test, data_type=self.data_type, transform=transform_test, sgm=25, ratio=1, size_data=size_data, size_window=size_window)
+        dataset_test = Dataset(dir_data_test, data_type=self.data_type, transform=transform_test, sgm=25, ratio=0.8, size_data=size_data, size_window=size_window, norm_method=norm_method)
         loader_test = torch.utils.data.DataLoader(dataset_test, batch_size=batch_size, shuffle=False, num_workers=8)
 
         num_test = len(dataset_test)
@@ -368,8 +402,9 @@ class Train:
         init_net(netG, init_type='normal', init_gain=0.02, gpu_ids=gpu_ids)
 
         ## setup loss & optimization
-        fn_REG = nn.L1Loss().to(device)  # L1
-        # fn_REG = nn.MSELoss().to(device)  # L1
+        fn_REG = CharbonnierLoss().to(device)  # Charbonnier loss (robust L1)
+        # fn_REG = nn.L1Loss().to(device)  # Original L1 loss
+        # fn_REG = nn.MSELoss().to(device)  # L2 loss
 
         ## load from checkpoints
         st_epoch = 0
@@ -382,10 +417,11 @@ class Train:
             # netG.train()
 
             loss_G_test = []
+            psnr_test = []
 
             for i, data in enumerate(loader_test, 1):
-                # input = data['input'].to(device)
-                input = data['label'].to(device)
+                input = data['input'].to(device)
+                # input = data['label'].to(device)
                 label = data['label'].to(device)
                 mask = data['mask'].to(device)
 
@@ -394,11 +430,18 @@ class Train:
                 loss_G = fn_REG(output * (1 - mask), label * (1 - mask))
 
                 loss_G_test += [loss_G.item()]
+                
+                # Calculate PSNR
+                output_np = output.detach().cpu().numpy()
+                label_np = label.detach().cpu().numpy()
+                psnr = calculate_psnr(output_np, label_np)
+                psnr_test.append(psnr)
 
                 input = transform_inv(input)
                 label = transform_inv(label)
                 output = transform_inv(output)
 
+                # Clip values to [0,1] range for proper visualization
                 input = np.clip(input, 0, 1)
                 label = np.clip(label, 0, 1)
                 output = np.clip(output, 0, 1)
@@ -419,8 +462,8 @@ class Train:
 
                     append_index(dir_result_test, fileset)
 
-                print('TEST: %d/%d: LOSS: %.6f' % (i, num_batch_test, loss_G.item()))
-            print('TEST: AVERAGE LOSS: %.6f' % (np.mean(loss_G_test)))
+                print('TEST: %d/%d: LOSS: %.6f, PSNR: %.2f dB' % (i, num_batch_test, loss_G.item(), psnr))
+            print('TEST: AVERAGE LOSS: %.6f, AVERAGE PSNR: %.2f dB' % (np.mean(loss_G_test), np.mean(psnr_test)))
 
 
 def set_requires_grad(nets, requires_grad=False):
