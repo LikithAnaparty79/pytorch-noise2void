@@ -1,4 +1,9 @@
 import argparse
+import json
+import io
+import os
+import numpy as np
+import matplotlib.pyplot as plt
 
 import torch.backends.cudnn as cudnn
 from train import *
@@ -36,6 +41,9 @@ parser.add_argument('--train_continue', default='on', choices=['on', 'off'], des
 
 parser.add_argument('--scope', default='denoising_resnet', dest='scope')
 parser.add_argument('--norm', type=str, default='bnorm', dest='norm')
+parser.add_argument('--norm_method', type=str, default='adaptive', 
+                    choices=['minmax', 'global-minmax', 'z-score', 'adaptive'], 
+                    help='Image normalization method', dest='norm_method')
 
 parser.add_argument('--name_data', type=str, default='bsd500', dest='name_data')
 
@@ -51,8 +59,8 @@ parser.add_argument('--ny_in', type=int, default=321, dest='ny_in')
 parser.add_argument('--nx_in', type=int, default=481, dest='nx_in')
 parser.add_argument('--nch_in', type=int, default=3, dest='nch_in')
 
-parser.add_argument('--ny_load', type=int, default=256, dest='ny_load')
-parser.add_argument('--nx_load', type=int, default=256, dest='nx_load')
+parser.add_argument('--ny_load', type=int, default=128, dest='ny_load')
+parser.add_argument('--nx_load', type=int, default=128, dest='nx_load')
 parser.add_argument('--nch_load', type=int, default=3, dest='nch_load')
 
 parser.add_argument('--ny_out', type=int, default=256, dest='ny_out')
