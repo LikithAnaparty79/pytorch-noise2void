@@ -5,7 +5,7 @@ import logging
 import torch
 import numpy as np
 import math
-# import argparse
+import argparse
 
 # Calculate PSNR (Peak Signal-to-Noise Ratio)
 def calculate_psnr(img1, img2, data_range=1.0):
@@ -26,17 +26,12 @@ def calculate_psnr(img1, img2, data_range=1.0):
     if isinstance(img2, torch.Tensor):
         img2 = img2.detach().cpu().numpy()
     
-    # Ensure images have the same shape
-    assert img1.shape == img2.shape, "Images must have the same dimensions"
-    
     # Calculate MSE (Mean Squared Error)
     mse = np.mean((img1 - img2) ** 2)
     if mse == 0:
-        return float('inf')  # Perfect similarity
-    
+        return float('inf') 
     # Calculate PSNR
     psnr = 20 * math.log10(data_range / math.sqrt(mse))
-    
     return psnr
 
 ''''

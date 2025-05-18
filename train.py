@@ -180,8 +180,7 @@ class Train:
 
         optimG = torch.optim.Adam(paramsG, lr=lr_G, betas=(self.beta1, 0.999))
         
-        # Add a learning rate scheduler (StepLR) similar to CBCT implementation
-        # This reduces learning rate by half every 50 epochs
+        # learning rate scheduler (StepLR)
         scheduler = StepLR(optimG, step_size=50, gamma=0.5)
 
         ## load from checkpoints
@@ -338,10 +337,9 @@ class Train:
                 writer_val.add_scalar('loss_G', np.mean(loss_G_val), epoch)
                 writer_val.add_scalar('psnr', np.mean(psnr_val), epoch)
 
-            # Step the scheduler at the end of each epoch
             scheduler.step()
             
-            # Log the current learning rate
+            # Log current learning rate
             current_lr = optimG.param_groups[0]['lr']
             writer_train.add_scalar('learning_rate', current_lr, epoch)
             print(f"Epoch {epoch} completed. Learning rate: {current_lr:.6f}")

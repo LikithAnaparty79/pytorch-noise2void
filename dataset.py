@@ -5,8 +5,8 @@ from skimage import transform
 import matplotlib.pyplot as plt
 import os
 import copy
-from skimage import exposure  # Add this import for CLAHE
-from scipy import io  # Add this for .mat file handling
+from skimage import exposure
+from scipy import io 
 import json
 
 
@@ -100,29 +100,20 @@ class Dataset(torch.utils.data.Dataset):
         
         # Check file type and load accordingly
         if file_path.endswith('.npy'):
-            # Load numpy array
             data = np.load(file_path)
         elif file_path.endswith('.mat'):
-            # Load .mat file
             try:
                 mat_contents = io.loadmat(file_path)
-                # Extract the first non-metadata key or specific keys
                 if 'noisy_image' in mat_contents:
                     data = mat_contents['noisy_image']
                 elif 'clean_image' in mat_contents:
                     data = mat_contents['clean_image']
-                else:
-                    # Get first non-metadata key
-                    key = next(k for k in mat_contents if not k.startswith('__'))
-                    data = mat_contents[key]
-                
                 data = data.astype(np.float32)
             except Exception as e:
                 print(f"Error loading .mat file {file_path}: {e}")
                 # Return zeros as fallback
                 data = np.zeros(self.size_data, dtype=np.float32)
         else:
-            # Load image
             data = plt.imread(file_path)
             if data.dtype == np.uint8:
                 data = data / 255.0
@@ -205,9 +196,6 @@ class Dataset(torch.utils.data.Dataset):
                         img = mat_contents['noisy_image']
                     elif 'clean_image' in mat_contents:
                         img = mat_contents['clean_image']
-                    else:
-                        key = next(k for k in mat_contents if not k.startswith('__'))
-                        img = mat_contents[key]
                 else:
                     img = plt.imread(file_path)
                     if img.dtype == np.uint8:
@@ -237,7 +225,7 @@ class Dataset(torch.utils.data.Dataset):
             print(f"Global stats (full dataset): mean={self.global_mean:.4f}, std={self.global_std:.4f}, "
                   f"min={self.global_min:.4f}, max={self.global_max:.4f}")
             
-            # Save stats for future use
+            # Save stats 
             try:
                 stats = {
                     'mean': self.global_mean,
